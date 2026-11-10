@@ -5,7 +5,7 @@ import requests
 import os
 
 # ⚠️ 본인의 엔트리 작품 ID를 입력하세요 (URL 주소창 맨 뒤 영어+숫자 조합)
-PROJECT_ID = "여러분의_엔트리_작품_ID_입력" 
+PROJECT_ID = "6af282c01849c26d27255ba2" 
 
 async def entry_bot():
     uri = f"wss://playentry.org/content/{PROJECT_ID}/websocket"
