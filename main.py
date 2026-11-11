@@ -1,89 +1,171 @@
-import asyncio
-import json
-import websockets
-import requests
+
 import os
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import json
+import asyncio
+import logging
+from datetime import datetime
+
+import requests
+import websockets
+
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
 
-PROJECT_ID = "6af282c01849c26d27255ba2"
+# -------------------------
+# 설정
+# -------------------------
 
+PROJECT_ID = os.getenv("PROJECT_ID")
+PORT = int(os.getenv("PORT", "10000"))
 
-# Render 포트 확인용 HTTP 서버
-class HealthHandler(BaseHTTPRequestHandler):
+ENTRY_WS_URL = (
+    f"wss://playentry.org/content/{PROJECT_ID}/websocket"
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+
+# -------------------------
+# HTTP 서버
+# -------------------------
+
+class Handler(BaseHTTPRequestHandler):
+
     def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Entry Bot is running!")
+        if self.path == "/":
+            body = b"Entry Bot is running!"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
-    def log_message(self, format, *args):
+        elif self.path == "/health":
+            body = json.dumps({
+                "status": "running",
+                "websocket": "managed separately"
+            }).encode()
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        else:
+            self.send_error(404)
+
+    def log_message(self, *args):
         pass
 
 
-def start_http_server():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    print(f"HTTP 서버 실행: {port}")
+def start_http():
+    server = HTTPServer(("0.0.0.0", PORT), Handler)
+    logging.info("HTTP server started on port %s", PORT)
     server.serve_forever()
 
 
-async def entry_bot():
-    uri = f"wss://playentry.org/content/{PROJECT_ID}/websocket"
+# -------------------------
+# JSON 분석
+# -------------------------
+
+def log_entry_message(message):
+
+    print("\n========== ENTRY MESSAGE ==========")
+
+    try:
+        data = json.loads(message)
+
+        print(json.dumps(
+            data,
+            ensure_ascii=False,
+            indent=2
+        ))
+
+    except (json.JSONDecodeError, TypeError):
+        print(message)
+
+    print("===================================\n")
+
+
+# -------------------------
+# 외부 URL 요청
+# -------------------------
+
+def request_url(url):
+
+    try:
+        response = requests.get(
+            url,
+            timeout=15
+        )
+
+        response.raise_for_status()
+
+        return response.json()
+
+    except requests.RequestException as error:
+        logging.error("HTTP request failed: %s", error)
+
+    except ValueError:
+        logging.error("Invalid JSON response")
+
+    return None
+
+
+# -------------------------
+# Entry WebSocket
+# -------------------------
+
+async def entry_worker():
+
+    if not PROJECT_ID:
+        raise RuntimeError("PROJECT_ID 환경변수가 없습니다.")
 
     while True:
+
         try:
-            print("엔트리 서버 연결 시도...")
+            logging.info("Connecting to Entry WebSocket...")
 
-            async with websockets.connect(uri) as websocket:
-                print("엔트리 실시간 서버 연결 성공!")
+            async with websockets.connect(
+                ENTRY_WS_URL,
+                ping_interval=20,
+                ping_timeout=20
+            ) as websocket:
 
-                await websocket.send(json.dumps({
-                    "type": "connect",
-                    "projectId": PROJECT_ID
-                }))
+                logging.info("Entry WebSocket connected!")
 
                 async for message in websocket:
-                    data = json.loads(message)
 
-                    if data.get("type") == "variable" and data.get("name") == "요청_URL":
-                        url = data.get("value")
+                    log_entry_message(message)
 
-                        if not url:
-                            continue
+        except Exception as error:
 
-                        print(f"요청 감지: {url}")
+            logging.error(
+                "WebSocket disconnected: %s",
+                error
+            )
 
-                        try:
-                            response = requests.get(url, timeout=5)
-
-                            if response.status_code == 200:
-                                result_text = response.json().get(
-                                    "message", "데이터 없음"
-                                )
-                            else:
-                                result_text = f"에러: {response.status_code}"
-
-                        except Exception:
-                            result_text = "요청 실패"
-
-                        send_data = {
-                            "type": "variable",
-                            "name": "응답_데이터",
-                            "value": result_text,
-                            "projectId": PROJECT_ID
-                        }
-
-                        await websocket.send(json.dumps(send_data))
-                        print(f"응답 전송 완료: {result_text}")
-
-        except Exception as e:
-            print(f"연결 오류: {e}")
+            logging.info("Reconnecting in 5 seconds...")
             await asyncio.sleep(5)
 
 
+# -------------------------
+# 프로그램 시작
+# -------------------------
+
 async def main():
-    Thread(target=start_http_server, daemon=True).start()
-    await entry_bot()
+
+    http_thread = Thread(
+        target=start_http,
+        daemon=True
+    )
+
+    http_thread.start()
+
+    await entry_worker()
 
 
 if __name__ == "__main__":
